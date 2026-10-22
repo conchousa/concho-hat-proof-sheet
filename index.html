@@ -234,6 +234,7 @@ kbd{font-family:inherit;font-size:12px;border:1px solid var(--app-border);border
       <label class="check"><input type="checkbox" id="optMat" checked> Materials</label>
     </div>
     <div class="group">
+      <button class="btn warn" id="clearAllBtn" disabled>Delete all designs</button>
       <button class="btn primary" id="pdfBtn" disabled>Download PDF</button>
     </div>
   </div>
@@ -1206,6 +1207,7 @@ function syncControls(){
   const pn = $('#pname'); if (document.activeElement !== pn) pn.value = state.name;
   $('#optMat').checked = state.showMaterials;
   $('#pdfBtn').disabled = n === 0;
+  $('#clearAllBtn').disabled = n === 0;
   $('#status').innerHTML = n
     ? `<span><strong>${n} ${n===1?'hat':'hats'}</strong> on <strong>${p} ${p===1?'page':'pages'}</strong></span><span>Drop in single hats or a whole sheet. Drag hats to reorder. Click any text to edit it.</span><span>Paste more with <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>V</kbd></span>`
     : `<span>Saves as you go.</span>`;
@@ -1264,6 +1266,17 @@ document.addEventListener('click', e => {
   if (t.dataset.act === 'add' || t.id === 'addBtn'){ $('#fileIn').click(); return; }
   if (t.dataset.pages && state){ state.pagesMode = t.dataset.pages; render(); save(); return; }
   if (t.id === 'pdfBtn'){ exportPdf(); return; }
+  if (t.id === 'clearAllBtn' && state){
+    if (!clearArmed){
+      t.textContent = 'Click again to delete all';
+      clearArmed = setTimeout(() => { t.textContent = 'Delete all designs'; clearArmed = null; }, 3000);
+      return;
+    }
+    clearTimeout(clearArmed); clearArmed = null; t.textContent = 'Delete all designs';
+    state.hats = []; render(); save();
+    toast('All designs deleted. Paste in new ones.');
+    return;
+  }
   if (t.dataset.color){
     const [id, i] = t.dataset.color.split(':'); colorTarget = {id, i:+i, el:t};
     const ci = $('#colorIn'); ci.value = findHat(id).swatches[+i].color.slice(0,7); ci.click(); return;
