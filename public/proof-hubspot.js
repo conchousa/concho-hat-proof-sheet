@@ -2,18 +2,8 @@
   const params = new URLSearchParams(location.search);
   const dealId = params.get('deal');
   if (!dealId || !/^\d+$/.test(dealId)) return;
-  const KEY = 'conchoProofPasscode';
-  let deal = null;
-  function pass(force){
-    let p = !force && localStorage.getItem(KEY);
-    if (!p){ p = prompt('Enter the Concho proof builder passcode'); if (!p) return null; localStorage.setItem(KEY, p); }
-    return p;
-  }
-  async function api(path, opts, retry){
-    const p = pass(retry); if (!p) throw new Error('Passcode required');
-    opts = opts || {}; opts.headers = Object.assign({'X-Passcode': p}, opts.headers || {});
-    const r = await fetch(path, opts);
-    if (r.status === 401 && !retry){ localStorage.removeItem(KEY); return api(path, opts, true); }
+  async function api(path, opts){
+    const r = await fetch(path, opts || {});
     const j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || ('HTTP ' + r.status));
     return j;

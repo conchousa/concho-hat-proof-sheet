@@ -3,7 +3,6 @@ const multer = require('multer');
 const crypto = require('crypto');
 const path = require('path');
 const TOKEN = process.env.HUBSPOT_PROOF_BUILDER_TOKEN;
-const PASS = process.env.PROOF_BUILDER_PASSCODE || '';
 const HS = 'https://api.hubapi.com';
 const app = express();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 40 * 1024 * 1024 } });
@@ -21,12 +20,6 @@ async function hs(method, url, body, isForm){
   let j; try { j = text ? JSON.parse(text) : {}; } catch { j = { raw: text }; }
   if (!r.ok){ const e = new Error(`HubSpot ${method} ${url.split('?')[0]} -> ${r.status}: ${j.message || text}`); e.status = r.status; e.body = j; throw e; }
   return j;
-}
-function auth(req, res, next){
-  const p = String(req.get('X-Passcode') || '');
-  const a = Buffer.from(p), b = Buffer.from(PASS);
-  if (!PASS || a.length !== b.length || !crypto.timingSafeEqual(a, b)) return res.status(401).json({ error: 'Bad passcode' });
-  next();
 }
 const labelCache = {};
 async function labels(prop){
@@ -48,7 +41,7 @@ async function getDeal(id){
 function validId(req, res){ if (!/^\d+$/.test(req.params.id)){ res.status(400).json({ error: 'Bad deal id' }); return false; } return true; }
 
 app.get('/healthz', (req, res) => res.send('ok'));
-app.get('/api/deal/:id', auth, async (req, res) => {
+app.get('/api/deal/:id', async (req, res) => {
   if (!validId(req, res)) return;
   try{
     const d = await getDeal(req.params.id); const p = d.properties;
@@ -74,7 +67,7 @@ app.get('/api/deal/:id', auth, async (req, res) => {
   }catch(e){ console.error(e.message); res.status(e.status === 404 ? 404 : 502).json({ error: e.message }); }
 });
 
-app.post('/api/deal/:id/ready', auth, upload.single('pdf'), async (req, res) => {
+app.post('/api/deal/:id/ready', upload.single('pdf'), async (req, res) => {
   if (!validId(req, res)) return;
   if (!req.file || req.file.mimetype !== 'application/pdf' && !req.file.originalname.endsWith('.pdf')) return res.status(400).json({ error: 'PDF required' });
   const id = req.params.id, done = [];
@@ -103,6 +96,25 @@ app.post('/api/deal/:id/ready', auth, upload.single('pdf'), async (req, res) => 
     res.json({ ok: true, round, fileId: file.id, noteId: note.id, taskId: task.id, ownerId: p.hubspot_owner_id || null });
   }catch(e){ console.error(e.message, JSON.stringify(e.body || {})); res.status(502).json({ error: e.message, completed: done }); }
 });
+
+const BASE = process.env.PUBLIC_URL || 'https://concho-proof-builder.onrender.com';
+let backfilling = false;
+async function backfillLinks(){
+  if (backfilling) return; backfilling = true; let n = 0;
+  try{
+    for (let guard = 0; guard < 200; guard++){
+      const r = await hs('POST', '/crm/v3/objects/deals/search', { filterGroups: [{ filters: [{ propertyName: 'proof_builder_link', operator: 'NOT_HAS_PROPERTY' }] }], properties: ['dealname'], limit: 100 });
+      if (!r.results.length) break;
+      await hs('POST', '/crm/v3/objects/deals/batch/update', { inputs: r.results.map(d => ({ id: d.id, properties: { proof_builder_link: `${BASE}/?deal=${d.id}` } })) });
+      n += r.results.length;
+      await new Promise(res => setTimeout(res, 1500)); // search index lag
+    }
+    if (n) console.log(`backfilled proof_builder_link on ${n} deals`);
+  }catch(e){ console.error('backfill failed:', e.message); }
+  finally{ backfilling = false; }
+}
+setTimeout(backfillLinks, 10000);
+setInterval(backfillLinks, 15 * 60 * 1000);
 
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html' }));
 app.listen(process.env.PORT || 3000, () => console.log('proof builder up'));
