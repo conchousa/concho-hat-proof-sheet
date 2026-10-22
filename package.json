@@ -1,0 +1,4 @@
+{ "name": "concho-proof-builder", "private": true, "main": "server.js",
+  "engines": { "node": ">=20" },
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.21.0", "multer": "^1.4.5-lts.1" } }
