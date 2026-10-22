@@ -84,7 +84,7 @@ kbd{font-family:inherit;font-size:12px;border:1px solid var(--app-border);border
 .t-top{display:flex;align-items:baseline;gap:8px;min-width:0;height:20px}
 .t-num{font-family:'Anton',sans-serif;font-size:20px;line-height:1;flex:none}
 .t-label{font-size:8.5px;color:#8A8175;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
-.t-img{position:relative;flex:1;min-height:0;background:#FFFFFF;border-radius:10px;box-shadow:0 2px 8px rgba(60,51,44,.08);overflow:hidden;display:flex;align-items:center;justify-content:center}
+.t-img{position:relative;flex:1;min-height:0;background:#FFFFFF;border-radius:10px;border:1px solid #DED6C8;box-shadow:0 2px 8px rgba(60,51,44,.08);overflow:hidden;display:flex;align-items:center;justify-content:center}
 .t-img img{display:block;max-width:none;user-select:none;-webkit-user-drag:none;pointer-events:none}
 .t-sw{display:flex;gap:4px 8px;flex-wrap:wrap;align-items:center;min-height:16px}
 .sw{display:flex;align-items:center;gap:4px;min-width:0;position:relative}
@@ -804,38 +804,202 @@ async function loadIndex(){
 async function loadProject(id){
   const v = await kvGet('proj:'+id);
   if (!v) return null;
-  try{ const p = JSON.parse(v); const base = freshState(p.name); delete p.showLabels; return Object.assign(base, p); }catch(e){ return null; }
+  try{ const p = JSON.parse(v); const base = freshState(p.name); delete p.showLabels; (p.hats||[]).forEach(x => { delete x.swatches; delete x.label; }); return Object.assign(base, p); }catch(e){ return null; }
 }
 
 /* ---------------- image processing ---------------- */
 function loadImg(src){
   return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
 }
-async function fileToHat(file){
+/* One file can hold one hat or a whole sheet of hats. Sheets get split so
+   every hat lands in its own tile. */
+async function fileToHats(file){
   const url = URL.createObjectURL(file);
   try{
     const img = await loadImg(url);
     let w = img.naturalWidth || 1200, h = img.naturalHeight || 1200;
-    const MAX = 1400;
     const isSvg = /svg/.test(file.type);
+    const MAX = 2400;
     const k = (isSvg || Math.max(w,h) > MAX) ? MAX / Math.max(w,h) : 1;
     w = Math.max(1, Math.round(w*k)); h = Math.max(1, Math.round(h*k));
     const c = document.createElement('canvas'); c.width = w; c.height = h;
     const ctx = c.getContext('2d', {willReadFrequently:true});
     ctx.drawImage(img, 0, 0, w, h);
+    const d = ctx.getImageData(0,0,w,h).data;
+    const pieces = findPieces(d, w, h);
+    if (pieces){
+      return pieces.map(p => cropHat(c, w, h, p, p.transparent));
+    }
     const a = analyze(ctx, w, h);
-    const pad = Math.round(Math.max(a.x1-a.x0, a.y1-a.y0) * 0.025);
-    const x0 = Math.max(0, a.x0-pad), y0 = Math.max(0, a.y0-pad);
-    const x1 = Math.min(w, a.x1+pad), y1 = Math.min(h, a.y1+pad);
-    const cw = x1-x0, ch = y1-y0;
-    const out = document.createElement('canvas'); out.width = cw; out.height = ch;
-    const octx = out.getContext('2d');
-    if (!a.transparent){ octx.fillStyle = '#FFFFFF'; octx.fillRect(0,0,cw,ch); }
-    octx.drawImage(c, x0, y0, cw, ch, 0, 0, cw, ch);
-    const src = a.transparent ? out.toDataURL('image/png') : out.toDataURL('image/jpeg', 0.92);
-    const colors = a.colors.length ? a.colors : ['#3C332C','#F0EADE','#86422D'];
-    return {id:uid(), src, w:cw, h:ch, label:DEFAULT_LABEL, swatches:colors.map(col => ({color:col, pms:DEFAULT_PMS}))};
+    return [cropHat(c, w, h, a, a.transparent)];
   } finally { URL.revokeObjectURL(url); }
+}
+function cropHat(c, w, h, b, transparent){
+  const pad = Math.round(Math.max(b.x1-b.x0, b.y1-b.y0) * 0.03);
+  const x0 = Math.max(0, b.x0-pad), y0 = Math.max(0, b.y0-pad);
+  const x1 = Math.min(w, b.x1+pad), y1 = Math.min(h, b.y1+pad);
+  let cw = x1-x0, ch = y1-y0;
+  const s = Math.min(1, 1400 / Math.max(cw, ch));
+  const ow = Math.max(1, Math.round(cw*s)), oh = Math.max(1, Math.round(ch*s));
+  const out = document.createElement('canvas'); out.width = ow; out.height = oh;
+  const o = out.getContext('2d');
+  if (!transparent){ o.fillStyle = '#FFFFFF'; o.fillRect(0,0,ow,oh); }
+  o.imageSmoothingQuality = 'high';
+  o.drawImage(c, x0, y0, cw, ch, 0, 0, ow, oh);
+  if (b.erase && b.erase.length){
+    o.fillStyle = b.bg ? `rgb(${b.bg.map(Math.round).join(',')})` : '#FFFFFF';
+    for (const e of b.erase){
+      const ex = (e.x0-x0)*s, ey = (e.y0-y0)*s, ew = (e.x1-e.x0)*s, eh = (e.y1-e.y0)*s;
+      if (transparent) o.clearRect(ex, ey, ew, eh); else o.fillRect(ex, ey, ew, eh);
+    }
+  }
+  const src = transparent ? out.toDataURL('image/png') : out.toDataURL('image/jpeg', 0.92);
+  return {id:uid(), src, w:ow, h:oh};
+}
+function cornerBg(d, w, r){
+  const at = (x,y) => { const i=(y*w+x)*4; return [d[i],d[i+1],d[i+2],d[i+3]]; };
+  const cs = [at(r.x0,r.y0), at(r.x1-1,r.y0), at(r.x0,r.y1-1), at(r.x1-1,r.y1-1)];
+  const transparent = cs.filter(q => q[3] < 20).length >= 3;
+  let bg = null;
+  if (!transparent){
+    const avg = [0,1,2].map(k => cs.reduce((s,q)=>s+q[k],0)/4);
+    const spread = Math.max(...cs.map(q => Math.abs(q[0]-avg[0])+Math.abs(q[1]-avg[1])+Math.abs(q[2]-avg[2])));
+    if (spread < 45) bg = avg;
+  }
+  return {transparent, bg};
+}
+function modeBg(d, w, r){
+  const counts = new Map();
+  const sx = Math.max(1, Math.floor((r.x1-r.x0)/120)), sy = Math.max(1, Math.floor((r.y1-r.y0)/120));
+  let n = 0;
+  for (let y=r.y0;y<r.y1;y+=sy) for (let x=r.x0;x<r.x1;x+=sx){
+    const i = (y*w+x)*4; n++;
+    const key = d[i+3] < 20 ? -1 : ((d[i]>>3)<<10)|((d[i+1]>>3)<<5)|(d[i+2]>>3);
+    const c = counts.get(key) || [0,0,0,0];
+    c[0]+=d[i]; c[1]+=d[i+1]; c[2]+=d[i+2]; c[3]++; counts.set(key, c);
+  }
+  let bestK = null, best = null;
+  for (const [k,c] of counts) if (!best || c[3] > best[3]){ best = c; bestK = k; }
+  if (!best || best[3] < n*0.3) return {transparent:false, bg:null};
+  if (bestK === -1) return {transparent:true, bg:null};
+  return {transparent:false, bg:[best[0]/best[3], best[1]/best[3], best[2]/best[3]]};
+}
+/* Inside one piece, drop stray marks (like a sheet's own hat numbers) that sit
+   outside the main hat shape. */
+function refine(m, mw, b){
+  const bw = b.x1-b.x0, bh = b.y1-b.y0;
+  const lab = new Int32Array(bw*bh);
+  const comps = [];
+  const stack = [];
+  for (let y=0;y<bh;y++) for (let x=0;x<bw;x++){
+    if (!m[(b.y0+y)*mw + b.x0+x] || lab[y*bw+x]) continue;
+    const id = comps.length+1, c = {n:0, x0:x, y0:y, x1:x+1, y1:y+1};
+    lab[y*bw+x] = id; stack.push(x, y);
+    while (stack.length){
+      const cy = stack.pop(), cx = stack.pop();
+      c.n++; if (cx < c.x0) c.x0 = cx; if (cx+1 > c.x1) c.x1 = cx+1; if (cy < c.y0) c.y0 = cy; if (cy+1 > c.y1) c.y1 = cy+1;
+      for (let dy=-1;dy<=1;dy++) for (let dx=-1;dx<=1;dx++){
+        const nx = cx+dx, ny = cy+dy;
+        if (nx<0||ny<0||nx>=bw||ny>=bh) continue;
+        const k = ny*bw+nx;
+        if (lab[k] || !m[(b.y0+ny)*mw + b.x0+nx]) continue;
+        lab[k] = id; stack.push(nx, ny);
+      }
+    }
+    comps.push(c);
+  }
+  if (comps.length < 2) return b;
+  const main = comps.reduce((a,c) => c.n > a.n ? c : a);
+  const mx = Math.max(2, (main.x1-main.x0)*0.03), my = Math.max(2, (main.y1-main.y0)*0.03);
+  let x0 = main.x0, y0 = main.y0, x1 = main.x1, y1 = main.y1;
+  const erase = [];
+  for (const c of comps){
+    if (c === main) continue;
+    const inside = c.x0 >= main.x0-mx && c.x1 <= main.x1+mx && c.y0 >= main.y0-my && c.y1 <= main.y1+my;
+    if (inside || c.n >= main.n*0.25){
+      x0 = Math.min(x0, c.x0); y0 = Math.min(y0, c.y0); x1 = Math.max(x1, c.x1); y1 = Math.max(y1, c.y1);
+    } else erase.push({x0:b.x0+c.x0, y0:b.y0+c.y0, x1:b.x0+c.x1, y1:b.y0+c.y1});
+  }
+  return {x0:b.x0+x0, y0:b.y0+y0, x1:b.x0+x1, y1:b.y0+y1, erase};
+}
+function xycut(m, mw, mh){
+  const out = [], gapMin = 2;
+  const rowHas = (y,x0,x1) => { for (let x=x0;x<x1;x++) if (m[y*mw+x]) return true; return false; };
+  const colHas = (x,y0,y1) => { for (let y=y0;y<y1;y++) if (m[y*mw+x]) return true; return false; };
+  function tight(b){
+    let {x0,y0,x1,y1} = b;
+    while (y0<y1 && !rowHas(y0,x0,x1)) y0++;
+    while (y1>y0 && !rowHas(y1-1,x0,x1)) y1--;
+    while (x0<x1 && !colHas(x0,y0,y1)) x0++;
+    while (x1>x0 && !colHas(x1-1,y0,y1)) x1--;
+    return (x1>x0 && y1>y0) ? {x0,y0,x1,y1} : null;
+  }
+  function segs(b, axis){
+    const res = []; let start = -1, empty = 0;
+    const lo = axis==='y' ? b.y0 : b.x0, hi = axis==='y' ? b.y1 : b.x1;
+    for (let k=lo;k<hi;k++){
+      const has = axis==='y' ? rowHas(k,b.x0,b.x1) : colHas(k,b.y0,b.y1);
+      if (has){
+        if (start < 0) start = k;
+        else if (empty >= gapMin){ res.push([start, k-empty]); start = k; }
+        empty = 0;
+      } else if (start >= 0) empty++;
+    }
+    if (start >= 0) res.push([start, hi-empty]);
+    return res.map(([a,z]) => axis==='y' ? {x0:b.x0,x1:b.x1,y0:a,y1:z} : {y0:b.y0,y1:b.y1,x0:a,x1:z});
+  }
+  function cut(b, depth){
+    b = tight(b); if (!b) return;
+    if (depth > 16){ out.push(b); return; }
+    let s = segs(b,'y'); if (s.length > 1){ s.forEach(x => cut(x, depth+1)); return; }
+    s = segs(b,'x'); if (s.length > 1){ s.forEach(x => cut(x, depth+1)); return; }
+    out.push(b);
+  }
+  cut({x0:0,y0:0,x1:mw,y1:mh}, 0);
+  return out;
+}
+function findPieces(d, w, h){
+  let r = {x0:0, y0:0, x1:w, y1:h};
+  for (let pass=0; pass<3; pass++){
+    const info = pass === 0 ? cornerBg(d, w, r) : modeBg(d, w, r);
+    if (!info.transparent && !info.bg) return null;
+    const bg = info.bg;
+    const rw = r.x1-r.x0, rh = r.y1-r.y0;
+    const st = Math.max(1, Math.ceil(Math.max(rw, rh) / 700));
+    const mw = Math.ceil(rw/st), mh = Math.ceil(rh/st);
+    const m = new Uint8Array(mw*mh);
+    for (let y=r.y0;y<r.y1;y++){
+      const my = ((y-r.y0)/st|0)*mw;
+      for (let x=r.x0;x<r.x1;x++){
+        const i = (y*w+x)*4;
+        if (d[i+3] < 20) continue;
+        if (!info.transparent && Math.abs(d[i]-bg[0])+Math.abs(d[i+1]-bg[1])+Math.abs(d[i+2]-bg[2]) < 30) continue;
+        m[my + ((x-r.x0)/st|0)] = 1;
+      }
+    }
+    const toPx = b => ({x0:r.x0+b.x0*st, y0:r.y0+b.y0*st, x1:Math.min(r.x1, r.x0+b.x1*st), y1:Math.min(r.y1, r.y0+b.y1*st)});
+    const leaves = xycut(m, mw, mh).map(b => refine(m, mw, b)).map(b => Object.assign(toPx(b), {
+      erase:(b.erase||[]).map(e => { const q = toPx(e); q.x0 -= st; q.y0 -= st; q.x1 += st; q.y1 += st; return q; })
+    }));
+    if (!leaves.length) return null;
+    const area = b => (b.x1-b.x0)*(b.y1-b.y0);
+    const shaped = leaves.filter(b => { const a = (b.x1-b.x0)/(b.y1-b.y0); return a < 4.5 && a > 0.22; });
+    const maxA = shaped.length ? Math.max(...shaped.map(area)) : 0;
+    const big = shaped.filter(b => area(b) >= maxA*0.2);
+    if (big.length >= 2 && big.every(b => area(b) >= maxA*0.35)){
+      big.forEach(b => { b.transparent = info.transparent; b.bg = bg; });
+      return big;
+    }
+    // a sheet sitting on a panel of its own color (like a screenshot): look inside the panel
+    const allMax = Math.max(...leaves.map(area));
+    const top = leaves.find(b => area(b) === allMax);
+    if (area(top) >= rw*rh*0.45 && top.x1-top.x0 > 20 && top.y1-top.y0 > 20){
+      r = {x0:top.x0+2, y0:top.y0+2, x1:top.x1-2, y1:top.y1-2};
+      continue;
+    }
+    return null;
+  }
+  return null;
 }
 function analyze(ctx, w, h){
   const d = ctx.getImageData(0,0,w,h).data;
@@ -897,13 +1061,14 @@ async function addFiles(files){
   if (!imgs.length){ toast('Those didn’t look like images. Try PNG, JPG, SVG or WebP.'); return; }
   toast(imgs.length === 1 ? 'Adding 1 design…' : `Adding ${imgs.length} designs…`);
   if (!state) return;
-  let added = 0;
+  let added = 0, ok = 0;
   for (const f of imgs){
-    try{ state.hats.push(await fileToHat(f)); added++; }catch(e){}
+    try{ const hs = await fileToHats(f); state.hats.push(...hs); added += hs.length; ok++; }catch(e){}
   }
   render(); save();
-  if (added < imgs.length) toast(`Added ${added} of ${imgs.length}. Some files couldn’t be read.`);
-  else toast(added === 1 ? 'Added 1 design' : `Added ${added} designs`);
+  if (ok < imgs.length) toast(`Added ${added} ${added===1?'hat':'hats'}. Some files couldn’t be read.`);
+  else if (added > imgs.length) toast(`Found ${added} hats and gave each its own spot`);
+  else toast(added === 1 ? 'Added 1 hat' : `Added ${added} hats`);
 }
 
 /* ---------------- layout ---------------- */
@@ -926,7 +1091,7 @@ function splitHats(){
   return out;
 }
 function bestLayout(n, W, H, aspect){
-  const gx = 16, gy = 12, over = 46;
+  const gx = 16, gy = 12, over = 26;
   let best = null;
   for (let c=1;c<=n;c++){
     const r = Math.ceil(n/c);
@@ -944,12 +1109,6 @@ function median(a){ const s=[...a].sort((x,y)=>x-y); return s.length ? s[Math.fl
 
 /* ---------------- render ---------------- */
 function tileHTML(h, num){
-  const sw = h.swatches.map((s,i) => `
-    <div class="sw">
-      <button class="sw-chip" style="background:${esc(s.color)}" data-color="${h.id}:${i}" aria-label="Change swatch color"></button>
-      <div class="sw-txt" contenteditable="true" spellcheck="false" data-hat="${h.id}" data-sw="${i}" data-k="pms">${esc(s.pms)}</div>
-      <button class="sw-x ui-only" data-swdel="${h.id}:${i}" aria-label="Remove swatch">×</button>
-    </div>`).join('');
   return `
   <div class="tile" data-id="${h.id}">
     <div class="t-top">
@@ -964,7 +1123,6 @@ function tileHTML(h, num){
         <button data-act="remove">Remove</button>
       </div>
     </div>
-    <div class="t-sw">${sw}${h.swatches.length < 5 ? `<button class="sw-add ui-only" data-swadd="${h.id}" aria-label="Add swatch">+</button>` : ''}</div>
   </div>`;
 }
 function matHTML(){
@@ -1049,7 +1207,7 @@ function syncControls(){
   $('#optMat').checked = state.showMaterials;
   $('#pdfBtn').disabled = n === 0;
   $('#status').innerHTML = n
-    ? `<span><strong>${n} ${n===1?'hat':'hats'}</strong> on <strong>${p} ${p===1?'page':'pages'}</strong></span><span>Click any text to edit it. Click a swatch to change its color. Drag hats to reorder.</span><span>Paste more with <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>V</kbd></span>`
+    ? `<span><strong>${n} ${n===1?'hat':'hats'}</strong> on <strong>${p} ${p===1?'page':'pages'}</strong></span><span>Drop in single hats or a whole sheet. Drag hats to reorder. Click any text to edit it.</span><span>Paste more with <kbd>Ctrl</kbd>/<kbd>⌘</kbd> + <kbd>V</kbd></span>`
     : `<span>Saves as you go.</span>`;
 }
 
@@ -1135,7 +1293,12 @@ $('#replaceIn').addEventListener('change', async e => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f || !replaceTarget) return;
   const h = findHat(replaceTarget); if (!h) return;
-  try{ const n = await fileToHat(f); Object.assign(h, {src:n.src, w:n.w, h:n.h, swatches:n.swatches}); render(); save(); toast('Design replaced'); }
+  try{
+    const ns = await fileToHats(f);
+    const i = state.hats.indexOf(h);
+    state.hats.splice(i, 1, ...ns);
+    render(); save(); toast(ns.length > 1 ? `Replaced with ${ns.length} hats` : 'Design replaced');
+  }
   catch(err){ toast('That file couldn’t be read. Try a PNG or JPG.'); }
 });
 $('#optMat').addEventListener('change', e => { state.showMaterials = e.target.checked; render(); save(); });
