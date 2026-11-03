@@ -25,7 +25,7 @@
     const P = window.__proof, st = P.getState();
     if (busy || !st) return;
     if (!st.hats.length){ P.toast('Add designs before sending.'); return; }
-    if (!confirm('Send this proof to HubSpot deal "' + deal.name + '"? This attaches the PDF, marks mockups sent, bumps the design round, and creates a task for the deal owner.')) return;
+    if (!confirm('Send this proof to HubSpot deal "' + deal.name + '"? This attaches the PDF, marks mockups sent, bumps the design round, @mentions Jake Connell on the note, and assigns him the task.')) return;
     busy = true;
     try{
       const blob = await P.buildPdf();
