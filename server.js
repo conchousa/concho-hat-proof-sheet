@@ -3,6 +3,7 @@ const multer = require('multer');
 const crypto = require('crypto');
 const path = require('path');
 const { sendReadyNotification } = require('./lib/ready-notify');
+const { readyNoteProperties, JAKE_OWNER_ID } = require('./lib/ready-note');
 const TOKEN = process.env.HUBSPOT_PROOF_BUILDER_TOKEN;
 const HS = 'https://api.hubapi.com';
 const app = express();
@@ -82,16 +83,25 @@ app.post('/api/deal/:id/ready', upload.single('pdf'), async (req, res) => {
     fd.append('options', JSON.stringify({ access: 'PRIVATE', overwrite: false, duplicateValidationStrategy: 'NONE' }));
     const file = await hs('POST', '/files/v3/files', fd, true); done.push('file ' + file.id);
     const now = new Date().toISOString();
-    const note = await hs('POST', '/crm/v3/objects/notes', {
-      properties: { hs_timestamp: now, hs_note_body: `<p><strong>Proof v${round} ready</strong></p><p>Mockup proof sheet attached (Concho Proof Builder).</p>`, hs_attachment_ids: String(file.id), ...(p.hubspot_owner_id ? { hubspot_owner_id: p.hubspot_owner_id } : {}) },
-      associations: [{ to: { id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 214 }] }]
-    }); done.push('note ' + note.id);
+    const noteProps = readyNoteProperties({ round, fileId: file.id, timestamp: now, dealOwnerId: p.hubspot_owner_id });
+    const noteAssoc = { associations: [{ to: { id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 214 }] }] };
+    let note;
+    try {
+      note = await hs('POST', '/crm/v3/objects/notes', { properties: noteProps, ...noteAssoc });
+    } catch (e) {
+      if (e.status === 400 && String(e.message).includes('hs_at_mentioned_owner_ids')) {
+        console.error('HubSpot rejected hs_at_mentioned_owner_ids; saving the note with mention markup only');
+        const { hs_at_mentioned_owner_ids, ...rest } = noteProps;
+        note = await hs('POST', '/crm/v3/objects/notes', { properties: rest, ...noteAssoc });
+      } else throw e;
+    }
+    done.push('note ' + note.id);
     await hs('PATCH', `/crm/v3/objects/deals/${id}`, { properties: { design_approval_status: 'mockups_sent_to_customer', design_round: String(round) } }); done.push('deal updated');
     const due = new Date(); // due today, 5pm Central
     const ct = new Date(due.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
     const offset = due - ct; const d5 = new Date(ct); d5.setHours(17, 0, 0, 0);
     const task = await hs('POST', '/crm/v3/objects/tasks', {
-      properties: { hs_task_subject: `Designs ready: ${p.dealname}`, hs_task_body: `Proof v${round} is attached to the deal. Send mockups to the customer.`, hs_timestamp: new Date(d5.getTime() + offset).toISOString(), hs_task_status: 'NOT_STARTED', hs_task_priority: 'MEDIUM', hs_task_type: 'TODO', ...(p.hubspot_owner_id ? { hubspot_owner_id: p.hubspot_owner_id } : {}) },
+      properties: { hs_task_subject: `Designs ready: ${p.dealname}`, hs_task_body: `Proof v${round} is attached to the deal. Send mockups to the customer.`, hs_timestamp: new Date(d5.getTime() + offset).toISOString(), hs_task_status: 'NOT_STARTED', hs_task_priority: 'MEDIUM', hs_task_type: 'TODO', hubspot_owner_id: JAKE_OWNER_ID },
       associations: [{ to: { id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 216 }] }]
     }); done.push('task ' + task.id);
     try {
@@ -99,7 +109,7 @@ app.post('/api/deal/:id/ready', upload.single('pdf'), async (req, res) => {
     } catch (mailErr) {
       console.error('Ready email failed:', mailErr && mailErr.message);
     }
-    res.json({ ok: true, round, fileId: file.id, noteId: note.id, taskId: task.id, ownerId: p.hubspot_owner_id || null });
+    res.json({ ok: true, round, fileId: file.id, noteId: note.id, taskId: task.id, ownerId: p.hubspot_owner_id || null, mentionedOwnerId: JAKE_OWNER_ID, taskOwnerId: JAKE_OWNER_ID });
   }catch(e){ console.error(e.message, JSON.stringify(e.body || {})); res.status(502).json({ error: e.message, completed: done }); }
 });
 
