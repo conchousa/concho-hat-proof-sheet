@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const crypto = require('crypto');
 const path = require('path');
+const { sendReadyNotification } = require('./lib/ready-notify');
 const TOKEN = process.env.HUBSPOT_PROOF_BUILDER_TOKEN;
 const HS = 'https://api.hubapi.com';
 const app = express();
@@ -93,6 +94,11 @@ app.post('/api/deal/:id/ready', upload.single('pdf'), async (req, res) => {
       properties: { hs_task_subject: `Designs ready: ${p.dealname}`, hs_task_body: `Proof v${round} is attached to the deal. Send mockups to the customer.`, hs_timestamp: new Date(d5.getTime() + offset).toISOString(), hs_task_status: 'NOT_STARTED', hs_task_priority: 'MEDIUM', hs_task_type: 'TODO', ...(p.hubspot_owner_id ? { hubspot_owner_id: p.hubspot_owner_id } : {}) },
       associations: [{ to: { id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 216 }] }]
     }); done.push('task ' + task.id);
+    try {
+      await sendReadyNotification({ dealName: p.dealname, round, dealId: id });
+    } catch (mailErr) {
+      console.error('Ready email failed:', mailErr && mailErr.message);
+    }
     res.json({ ok: true, round, fileId: file.id, noteId: note.id, taskId: task.id, ownerId: p.hubspot_owner_id || null });
   }catch(e){ console.error(e.message, JSON.stringify(e.body || {})); res.status(502).json({ error: e.message, completed: done }); }
 });
